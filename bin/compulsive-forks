@@ -1,0 +1,128 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require 'set'
+
+require 'octokit'
+
+options = { verbose: 0 }
+OptionParser.new do |opts|
+  opts.banner = "Usage: #{__FILE__} [options]"
+
+  opts.on('-v', '--[no-]verbose', 'Run verbosely; use twice for more verbosity') do |v|
+    options[:verbose] += 1
+  end
+
+  opts.on('-t', '--token access_token', 'GitHub personal access token') do |t|
+    options[:access_token] = t
+  end
+
+  opts.on('-o', '--organization organization', 'An organization to run against') do |o|
+    options[:organization] = o
+  end
+end.parse!
+
+if options[:access_token].nil? || options[:access_token].empty?
+  $stderr.puts('Access token is required. Create one at https://github.com/settings/tokens/new')
+  $stderr.puts('Include the "repo" scope to include private repositories')
+  exit(1)
+end
+
+client = Octokit::Client.new(access_token: options[:access_token])
+root = client.root
+
+repos = if options[:organization]
+  if options[:verbose] >= 2
+    $stderr.puts "Fetching repos for #{options[:organization]}"
+  end
+  root.rels[:organization_repositories].get(uri: { org: options[:organization] })
+else
+  if options[:verbose] >= 2
+    $stderr.puts 'Fetching your repos'
+  end
+  root.rels[:current_user_repositories].get(
+    query: { affiliation: 'owner', per_page: 100 }
+  )
+end
+
+loop do
+  repos.data.select(&:fork).each do |repo|
+    full = repo.rels[:self].get
+    parent = full.data.parent
+    if options[:verbose] >= 1
+      $stderr.puts "You forked #{repo.name} from #{full.data.parent.full_name}:"
+    end
+
+    shas = Set.new
+    delete = shas.method(:delete)
+
+    # Add our branches
+    sha_to_names = {}
+    if options[:verbose] >= 2
+      $stderr.puts 'Fetching branches'
+    end
+    branches = repo.rels[:branches].get(params: { per_page: 100 })
+    loop do
+      branches.data.each do |branch|
+        shas << branch.commit.sha
+        sha_to_names[branch.commit.sha] ||= []
+        sha_to_names[branch.commit.sha] << branch.name
+      end
+      break unless branches.rels[:next]
+      $stderr.puts 'Fetching next page of branches' if options[:verbose] >= 2
+      branches = branches.rels[:next].get
+    end
+    $stderr.puts "  #{shas.length} SHAs to check" if options[:verbose] >= 1
+
+    if shas.length == 0
+      puts "https://github.com/#{repo.full_name}/settings"
+      next
+    end
+
+    # Delete parent branches tips
+    parent_branches = parent.rels[:branches].get(query: { per_page: 100 })
+    loop do
+      parent_branches.data.each.map(&:commit).map(&:sha).each(&delete)
+      break if parent_branches.rels[:next].nil? || shas.empty?
+      if options[:verbose] >= 2
+        $stderr.puts 'Fetching next page of parent branches'
+      end
+      parent_branches = parent_branches.rels[:next].get
+    end
+    if options[:verbose] >= 1
+      $stderr.puts "  #{shas.length} SHAs after removing parent branch tips"
+    end
+
+    if shas.length == 0
+      puts "https://github.com/#{repo.full_name}/settings"
+      next
+    end
+
+    $stderr.puts 'Fetching commits' if options[:verbose] >= 2
+    commits = parent.rels[:commits].get(query: { per_page: 100 })
+    loop do
+      commits.data.map(&:sha).each(&delete)
+      break if commits.rels[:next].nil? || shas.empty?
+      $stderr.puts 'Fetching next page of commits' if options[:verbose] >= 2
+      commits = commits.rels[:next].get
+    end
+
+    if shas.length == 0
+      puts "https://github.com/#{repo.full_name}/settings"
+      next
+    end
+
+    if options[:verbose] >= 1
+      $stderr.puts "  #{shas.length} not found in parent"
+    end
+
+    shas.each do |sha|
+      if options[:verbose] >= 1
+        $stderr.puts "  -> #{sha} (#{sha_to_names[sha].join(', ')})"
+      end
+    end
+  end
+
+  break unless repos.rels[:next]
+  repos = repos.rels[:next].get
+end

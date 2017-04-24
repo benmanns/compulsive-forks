@@ -41,7 +41,7 @@ Linux:
 $ compulsive-forks -t my-token | xargs -n 1 xdg-open
 ```
 
-List them for an organization (in this case [doximity](https://github/doximity))
+List them for an organization (in this case [doximity](https://github.com/doximity))
 
 ```sh
 $ compulsive-forks -t my-token -o doximity
